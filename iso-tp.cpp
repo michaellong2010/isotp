@@ -1,19 +1,54 @@
-#include "Arduino.h"
+//#include "Arduino.h"
 #include "iso-tp.h"
-#include <mcp_can.h>
-#include <mcp_can_dfs.h>
-#include <SPI.h>
+//#include <mcp_can.h>
+//#include <mcp_can_dfs.h>
+//#include <SPI.h>
+#include <stdlib.h>
+#include <cstring>
+#include <unistd.h>
 
-IsoTp::IsoTp(MCP_CAN* bus, uint8_t mcp_int)
+IsoTp::~IsoTp()
 {
-  _mcp_int = mcp_int;
-  _bus = bus;
+  if ( s > 0 ) {
+    close ( s );
+    printf ("close socket can\n");
+  }
+}
+
+IsoTp::IsoTp(/*MCP_CAN* bus, uint8_t mcp_int*/)
+{
+  //_mcp_int = mcp_int;
+  //_bus = bus;
+
+  /* 20170809 added by michael
+  create a can socket*/
+  if((s = socket(PF_CAN, SOCK_RAW, CAN_RAW)) < 0) {
+    perror("Error while opening socket");
+    //return -1;
+  }
+  else {
+
+    strcpy(ifr.ifr_name, ifname);
+    ioctl(s, SIOCGIFINDEX, &ifr);
+
+    addr.can_family  = AF_CAN;
+    addr.can_ifindex = ifr.ifr_ifindex;
+    addr.can_addr.tp.rx_id = 0xabc;
+    addr.can_addr.tp.tx_id = 0xdef;
+
+    printf("%s at index %d\n", ifname, ifr.ifr_ifindex);
+
+    if(bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+      perror("Error in socket bind");
+      //return -2;
+    }
+  }
 }
 
 void IsoTp::print_buffer(uint32_t id, uint8_t *buffer, uint16_t len)
 {
   uint16_t i=0;
-
+#ifdef Arduino
   Serial.print(F("Buffer: "));
   Serial.print(id,HEX); Serial.print(F(" ["));
   Serial.print(len); Serial.print(F("] "));
@@ -24,6 +59,7 @@ void IsoTp::print_buffer(uint32_t id, uint8_t *buffer, uint16_t len)
     Serial.print(F(" "));
   }
   Serial.println();
+#endif
 }
 
 uint8_t IsoTp::can_send(uint32_t id, uint8_t len, uint8_t *data)
@@ -32,13 +68,52 @@ uint8_t IsoTp::can_send(uint32_t id, uint8_t len, uint8_t *data)
   Serial.println(F("Send CAN RAW Data:"));
   print_buffer(id, data, len);
 #endif
-  return _bus->sendMsgBuf(id, 0, len, data);
+  //return _bus->sendMsgBuf(id, 0, len, data);
+
+  /*20170809 added by michael*/
+  frame.can_id  = id;
+  frame.can_dlc = len;
+  memcpy ( frame.data, data, len );
+  nbytes = write(s, &frame, sizeof(struct can_frame));
+
+  printf("Wrote %d bytes\n", nbytes);
+  if ( nbytes > 0 )
+    return 0;
+  else
+     return -1;
+}
+
+/* 20170810 added by michael
+receive a raw can frame */
+uint8_t IsoTp::can_receive( uint32_t *prcv_id, uint8_t *prcv_len, uint8_t *data )
+{
+  memset ( &frame, 0, sizeof ( struct can_frame ) );
+
+  nbytes = read(s, &frame, sizeof(struct can_frame));
+
+  if (nbytes < 0) {
+    perror("can raw socket read");
+    return 1;
+  }
+  else {
+  /* paranoid check ... */
+  if (nbytes < sizeof(struct can_frame)) {
+    fprintf(stderr, "read: incomplete CAN frame\n");
+    return 2;
+  }
+  else {
+     *prcv_id = frame.can_id;
+     *prcv_len = frame.can_dlc;
+     memcpy ( data, frame.data, *prcv_len );
+     return 3;
+  }
+  }
 }
 
 uint8_t IsoTp::can_receive(void)
 {
   bool msgReceived;
-  
+#if 0  
   if (_mcp_int)
     msgReceived = (!digitalRead(_mcp_int));                     // IRQ: if pin is low, read receive buffer
   else
@@ -55,6 +130,7 @@ uint8_t IsoTp::can_receive(void)
     return true;
   }
   else return false;
+#endif
 }
 
 uint8_t IsoTp::send_fc(struct Message_t *msg)
@@ -93,7 +169,7 @@ uint8_t IsoTp::send_ff(struct Message_t *msg) // Send FF
 
 uint8_t IsoTp::send_cf(struct Message_t *msg) // Send SF Message
 {
-  uint8_t TxBuf[8]={0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+  uint8_t TxBuf[8]={0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a, 0x0a};
   uint16_t len=7;
 		 
   TxBuf[0]=(N_PCI_CF | (msg->seq_id & 0x0F));
@@ -107,10 +183,14 @@ uint8_t IsoTp::send_cf(struct Message_t *msg) // Send SF Message
 
 void IsoTp::fc_delay(uint8_t sep_time)
 {
-  if(sep_time < 0x80)
+  /*if(sep_time < 0x80)
     delay(sep_time);
   else
-    delayMicroseconds((sep_time-0xF0)*100);
+    delayMicroseconds((sep_time-0xF0)*100);*/
+  if ( sep_time < 0x80 )
+    usleep (  sep_time * 1000 );
+  else
+     usleep ( ( sep_time - 0xF0 ) * 100 );
 }
 
 uint8_t IsoTp::rcv_sf(struct Message_t* msg)
@@ -149,9 +229,12 @@ uint8_t IsoTp::rcv_ff(struct Message_t* msg)
   /* send our first FC frame with Target Address*/
   struct Message_t fc;
   fc.tx_id=msg->tx_id;
-  fc.fc_status=ISOTP_FC_CTS;
-  fc.blocksize=0;
-  fc.min_sep_time=0;
+  //fc.fc_status=ISOTP_FC_CTS;
+  //fc.blocksize=0;
+  //fc.min_sep_time=0;
+  fc.fc_status = msg->fc_status;
+  fc.blocksize = msg->blocksize;
+  fc.min_sep_time = msg->min_sep_time;
   return send_fc(&fc);
 }
 
@@ -160,6 +243,15 @@ uint8_t IsoTp::rcv_cf(struct Message_t* msg)
   //Handle Timeout
   //If no Frame within 250ms change State to ISOTP_IDLE
   uint32_t delta=millis()-wait_cf;
+
+  /* 20170816 added by michael
+  blocksize recoginize & reply a flow control frame to sender*/
+  uint8_t bs=false;
+  if (msg->blocksize > 0) {
+    if (!(msg->seq_id % msg->blocksize)) {
+      bs=true;
+    }
+  }
 
   if((delta >= TIMEOUT_FC) && msg->seq_id>1)
   {
@@ -212,7 +304,19 @@ uint8_t IsoTp::rcv_cf(struct Message_t* msg)
     rest-=7; // Got another 7 Bytes of Data;
   }
 
+  struct Message_t fc;
+  if ( bs == true ) {
+    fc.tx_id=msg->tx_id;
+    fc.fc_status = msg->fc_status;
+    fc.blocksize = msg->blocksize;
+    fc.min_sep_time = msg->min_sep_time;
+    send_fc( &fc );
+    wait_cf=millis();
+    printf ( "reply flow control frame \n" );
+  }
+
   msg->seq_id++;
+  msg->seq_id %= 16;
 
   return 0;
 }
@@ -346,7 +450,8 @@ uint8_t IsoTp::send(Message_t* msg)
 #ifdef ISO_TP_DEBUG
                                  Serial.println(F("Send CF"));
 #endif
-                                 while(msg->len>7 & !bs) 
+                                 printf ( " send CF\n " );
+                                 while(msg->len>7 && bs==false) 
                                  {
                                    fc_delay(msg->min_sep_time);
                                    if(!(retval=send_cf(msg)))
@@ -402,7 +507,21 @@ uint8_t IsoTp::send(Message_t* msg)
     if(msg->tp_state==ISOTP_WAIT_FIRST_FC || 
        msg->tp_state==ISOTP_WAIT_FC)
     {
-      if(can_receive())
+#if 0
+        can_receive ( &rxId, &rxLen, rxBuffer );
+        printf ( "rxId: %x\n", rxId );
+        printf ( "rxLen: %d\n", rxLen );
+        for ( int i = 0; i < rxLen; i++ ) {
+           printf ( "%d ", rxBuffer[ i ] );
+        }
+        printf ( "\n" );
+
+      break;
+      retval = -1;
+#endif
+#if 1
+      //if(can_receive())
+      if ( can_receive ( &rxId, &rxLen, rxBuffer ) == 3 )
       {
 #ifdef ISO_TP_DEBUG
         Serial.println(F("Send branch:"));
@@ -411,11 +530,13 @@ uint8_t IsoTp::send(Message_t* msg)
         {
           retval=rcv_fc(msg);
           memset(rxBuffer,0,sizeof(rxBuffer));
+          printf ( "rxId OK!\n" );
 #ifdef ISO_TP_DEBUG
           Serial.println(F("rxId OK!"));
 #endif
         }
       }
+#endif
     }
   }
 
@@ -446,7 +567,8 @@ uint8_t IsoTp::receive(Message_t* msg)
       return 1;
     }
 
-    if(can_receive())
+    //if(can_receive())
+    if ( can_receive ( &rxId, &rxLen, rxBuffer ) == 3 )
     {
       if(rxId==msg->rx_id)
       {
@@ -479,6 +601,7 @@ uint8_t IsoTp::receive(Message_t* msg)
                       Serial.println(F("FF"));
 #endif
                       /* rx path: first frame */
+                      wait_cf = 0;
                       rcv_ff(msg);
 //		      msg->tp_state=ISOTP_WAIT_DATA;
                       break;
@@ -503,3 +626,4 @@ uint8_t IsoTp::receive(Message_t* msg)
 
   return 0;
 }
+

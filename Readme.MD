@@ -21,3 +21,5 @@ Currently implemented:
 * simple frame padding with 0x00
 
 See usage example in example/send_receive/send_receive.ino
+
+sudo echo  "gcc iso-tp.cpp test_isotp_send.cpp -lstdc++ -std=c++11"

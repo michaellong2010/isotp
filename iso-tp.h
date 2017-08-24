@@ -1,9 +1,30 @@
 #ifndef _ISOTP_H
 #define _ISOTP_H
 
-#include <mcp_can.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+
+#include <net/if.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+
+#include <linux/can.h>
+#include <linux/can/raw.h>
+#include <time.h>
+
+//#include <mcp_can.h>
 
 //#define ISO_TP_DEBUG
+/* 20170810 added by michael
+Number of milliseconds since the program started */
+#define millis() ( ( clock () * 1000 ) / CLOCKS_PER_SEC )
+typedef unsigned char uint8_t;
+typedef unsigned short int uint16_t;
+typedef unsigned int uint32_t;
+//using namespace std;
 
 typedef enum {
   ISOTP_IDLE = 0,
@@ -56,13 +77,15 @@ struct Message_t
 class IsoTp
 {
 	public:
-		IsoTp(MCP_CAN* bus, uint8_t mcp_int);
+		IsoTp(/*MCP_CAN* bus, uint8_t mcp_int*/);
+		~IsoTp();
 		uint8_t send(Message_t* msg);
 		uint8_t receive(Message_t* msg);
 		void    print_buffer(uint32_t id, uint8_t *buffer, uint16_t len);
+                uint8_t  can_send(uint32_t id, uint8_t len, uint8_t *data);
 	private:
-		MCP_CAN* _bus;
-                uint8_t  _mcp_int;
+		//MCP_CAN* _bus;
+        //uint8_t  _mcp_int;
 		uint32_t rxId;
 		uint8_t  rxLen;
 		uint8_t  rxBuffer[8];
@@ -71,7 +94,7 @@ class IsoTp
 		uint32_t wait_fc=0;
 		uint32_t wait_cf=0;
     uint32_t wait_session=0;
-		uint8_t  can_send(uint32_t id, uint8_t len, uint8_t *data);
+//		uint8_t  can_send(uint32_t id, uint8_t len, uint8_t *data);
 		uint8_t  can_receive(void);
 		uint8_t  send_fc(struct Message_t* msg);
 		uint8_t  send_sf(struct Message_t* msg);
@@ -82,6 +105,17 @@ class IsoTp
 		uint8_t  rcv_cf(struct Message_t* msg);
 		uint8_t  rcv_fc(struct Message_t* msg);
     void     fc_delay(uint8_t sep_time);
+
+  /* 20170809 added by michael */
+        int s;
+	int nbytes;
+	struct sockaddr_can addr;
+	struct can_frame frame;
+	struct ifreq ifr;
+        const char *ifname = "vcan0";
+public:
+        uint8_t can_receive( uint32_t *prcv_id, uint8_t *prcv_len, uint8_t *data );
 };
                              
 #endif
+
